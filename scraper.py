@@ -18,10 +18,27 @@ GET_STOCK_URL = 'https://c0.3.cn/stock?area=1_72_2799_0&' \
                 'extraParam={"originid":"1"}&skuId='
 FILE_PATH = 'product_data.csv'
 
+URLOPEN_MAX_ATTEMPTS = 3
+
 
 def get_html(url):
-    response = urllib.request.urlopen(url)
-    return response.read()
+    """Sometimes urlopen method rises URLopenerror:
+    [Errno -3] Temporary failure in name resolution.
+    For that reason urlopen in cycle with URLOPEN_MAX_ATTEMPTS"""
+    result = False
+    for _ in range(URLOPEN_MAX_ATTEMPTS):
+        try:
+            response = urllib.request.urlopen(url)
+            result = True
+            break
+        except Exception:
+            print('cant resolve current url: ' + url)
+            print('trying again')
+
+    if result:
+        return response.read()
+    else:
+        exit("Error resolving url: " + url + "\nExit application :(")
 
 
 def parse_all_products(html, writer):
