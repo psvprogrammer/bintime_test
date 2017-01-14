@@ -31,7 +31,7 @@ def get_html(url):
             response = urllib.request.urlopen(url)
             result = True
             break
-        except Exception:
+        except urllib.request.URLError:
             print('cant resolve current url: ' + url)
             print('trying again')
 
