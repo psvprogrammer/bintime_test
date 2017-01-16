@@ -5,6 +5,7 @@ import json
 import csv
 import sys
 import re
+import asyncio
 
 from bs4 import BeautifulSoup
 
@@ -16,12 +17,12 @@ GET_PAGE_URL = 'https://search.jd.com/s_new.php?keyword=qnap&enc=utf-8' \
 GET_PRICE_URL = 'https://p.3.cn/prices/mgets?skuIds='
 GET_STOCK_URL = 'https://c0.3.cn/stock?area=1_72_2799_0&' \
                 'extraParam={"originid":"1"}&skuId='
-FILE_PATH = 'product_data.csv'
+FILE_PATH = 'product_data_test.csv'
 
 URLOPEN_MAX_ATTEMPTS = 3
 
 
-def get_html(url):
+async def get_html(url):
     """Sometimes urlopen method rises URLopenerror:
     [Errno -3] Temporary failure in name resolution.
     For that reason urlopen in cycle with URLOPEN_MAX_ATTEMPTS"""
@@ -42,72 +43,95 @@ def get_html(url):
         exit("Error resolving url: " + url + "\nExit application :(")
 
 
-def parse_all_products(html, writer):
-    print('getting product pages...')
+def get_html_(url):
+    result = False
+    for _ in range(URLOPEN_MAX_ATTEMPTS):
+        try:
+            response = urllib.request.urlopen(url)
+            result = True
+            break
+        except urllib.request.URLError as e:
+            print('\ncant resolve current url: ' + url)
+            print('(' + str(e) + ')')
+            print('trying again')
+
+    if result:
+        return response.read()
+    else:
+        exit("Error resolving url: " + url + "\nExit application :(")
+
+
+async def parse_all_products(html, products_data):
+    print('getting product pages..')
     html = BeautifulSoup(html, "html.parser")
     try:
-        page_len = int(html.find('div', id='J_topPage').span.i.text)
+        # page_len = int(html.find('div', id='J_topPage').span.i.text)
+        page_len = 1
     except AttributeError:
         page_len = 1
 
-    print(str(page_len) + ' pages found')
-    print('getting product list...')
-    sku_list = get_products_sku_list(page_len+1)
-    print('getting product prices...')
-    price_list = get_products_prices(sku_list)
-    parse_sku_list(sku_list, price_list, writer)
+    products_sku = []
+    parsed_sku = []
+    for page in range(1, page_len+1):
+        await parse_page(page, page_len,
+                         products_data, parsed_sku, products_sku)
     return
 
 
-def get_products_sku_list(page_len):
-    sku_list = []
-    for page in range(1, page_len):
-        html = get_html(GET_PAGE_URL + str(page))
-        html = BeautifulSoup(html, "html.parser")
-        product_list = html.find('div', {"id": "J_goodsList"}).ul
-        products = product_list.find_all('li')
+async def parse_page(page, page_len, products_data, parsed_sku, products_sku):
+    print('\nparsing page ' + str(page) +
+          '/' + str(page_len) + ':')
+    html = await get_html(GET_PAGE_URL + str(page))
+    html = BeautifulSoup(html, "html.parser")
+    product_list = html.find('div', {"id": "J_goodsList"}).ul
+    products = product_list.find_all('li')
 
-        # collecting products sku to get all product prices at ones than
-        for product in products:
-            sku_list.append('J_' + product.attrs['data-sku'])
+    # collecting products sku to get all product prices at ones than
+    products_sku = []
+    for product in products:
+        products_sku.append('J_' + product.attrs['data-sku'])
 
-    all_products_len = len(sku_list)
-    # remove duplicates
-    sku_list = list(set(sku_list))
+    print('getting product prices')
+    prices = await get_product_prices(products_sku)
 
-    print(str(all_products_len) + ' products found (' +
-          str(len(sku_list)) + ' - unique)')
-    return sku_list
-
-
-def parse_sku_list(sku_list, price_list, writer):
     print('gathering product info...')
     iteration = 0
-    length = len(sku_list)
+    length = len(products)
+    suffix = 'complete'
 
-    for sku in sku_list:
-        mpn = sku.replace('J_', '')
+    # page_data = []
+
+    for product in products:
+        mpn = product['data-sku']
         product_url = PRODUCT_URL + mpn + '.html'
-        page_html = get_html(product_url)
+        page_html = await get_html(product_url)
         product_page = BeautifulSoup(page_html, "html.parser")
+
         if product_page:
-            product_obj = parse_product_page(product_page, mpn,
-                                             product_url, price_list)
-            writer.writerow((
-                product_obj['Brand'],
-                product_obj['MPN'],
-                product_obj['URL'],
-                product_obj['Name'],
-                product_obj['Price'],
-                product_obj['Stock'],
-            ))
-            suffix = 'complete'
+            product_obj = await parse_product_page(product_page, mpn,
+                                                   product_url, prices)
+            if product_obj not in products_data:
+                # writer.writerow((
+                #     product_obj['Brand'],
+                #     product_obj['MPN'],
+                #     product_obj['URL'],
+                #     product_obj['Name'],
+                #     product_obj['Price'],
+                #     product_obj['Stock'],
+                # ))
+                products_data.append(product_obj)
+                suffix = 'complete (added)'
+            else:
+                suffix = 'complete (skipped)'
         else:
-            suffix = 'complete (skipped invalid html)'
+            suffix = 'complete (empty)'
 
         iteration += 1
-        prefix = 'Progress (' + str(iteration) + '/' + str(length) + ')'
+        prefix = 'Progress page ' + str(page) +\
+                 ' (' + str(iteration) + '/' + str(length) + ')'
         print_progress(iteration, length, prefix, suffix, bar_length=50)
+
+    return
 
 
 # Print iterations progress
@@ -134,32 +158,19 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1,
     sys.stdout.flush()
 
 
-def get_products_prices(products_sku):
+async def get_product_prices(products_sku):
+    byte_response = await get_html(GET_PRICE_URL + ','.join(products_sku))
+    str_response = byte_response.decode("utf-8", errors='ignore').strip()
+    jdata = json.loads(str_response)
     prices = {}
-    if len(products_sku) > 100:
-        # divide list on parts by 100 units (max possible)
-        products_sku = [products_sku[i:i + 100]
-                        for i in range(0, len(products_sku), 100)]
-        for part in products_sku:
-            byte_response = get_html(GET_PRICE_URL + ','.join(part))
-            parse_products_prices(byte_response, prices)
-    else:
-        byte_response = get_html(GET_PRICE_URL + ','.join(products_sku))
-        parse_products_prices(byte_response, prices)
+    for data in jdata:
+        prices[data['id'].replace('J_', '')] = data['p']
     return prices
 
 
-def parse_products_prices(response, prices):
-    str_response = response.decode("utf-8", errors='ignore').strip()
-    jdata = json.loads(str_response)
-    for data in jdata:
-        prices[data['id'].replace('J_', '')] = data['p']
-    return
-
-
-def get_product_stock(html, mpn):
+async def get_product_stock(html, mpn):
     cat = parse_product_cat(html)
-    byte_response = get_html(GET_STOCK_URL + mpn + cat)
+    byte_response = await get_html(GET_STOCK_URL + mpn + cat)
     str_response = byte_response.decode("gb2312", errors='ignore').strip()
     jdata = json.loads(str_response)
     stock_desc = jdata['stock']['stockDesc']
@@ -184,7 +195,7 @@ def parse_product_cat(html):
     return '&cat=' + ','.join(cats)
 
 
-def parse_product_page(html, mpn, url, prices):
+async def parse_product_page(html, mpn, url, prices):
     try:
         brand = html.find('ul', id='parameter-brand').li['title']
     except AttributeError:
@@ -203,11 +214,11 @@ def parse_product_page(html, mpn, url, prices):
         except AttributeError:
             name = ''
 
-    stock = get_product_stock(html, mpn)
+    stock = await get_product_stock(html, mpn)
 
-    try:
+    if prices[mpn]:
         price = prices[mpn]
-    except KeyError:
+    else:
         price = 0
 
     product_data = {
@@ -221,15 +232,33 @@ def parse_product_page(html, mpn, url, prices):
     return product_data
 
 
-def main():
-    with open(FILE_PATH, 'w') as csv_file:
+def save_csv(products, path):
+    with open(path, 'w') as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(('Brand', 'MPN', 'URL', 'Name', 'Price', 'Stock'))
-        try:
-            html = get_html(INIT_URL)
-            parse_all_products(html, writer)
-        except Exception as e:
-            print('\n' + str(e))
+
+        for product in products:
+            writer.writerow((
+                product['Brand'],
+                product['MPN'],
+                product['URL'],
+                product['Name'],
+                product['Price'],
+                product['Stock'],
+            ))
+
+
+def main():
+    try:
+        loop = asyncio.get_event_loop()
+        html = get_html_(INIT_URL)
+        products_data = []
+        tasks = [parse_all_products(html, products_data)]
+        loop.run_until_complete(asyncio.wait(tasks))
+        save_csv(products_data, FILE_PATH)
+        # parse_all_products(html, writer)
+    except Exception as e:
+        print(e)
 
 
 if __name__ == '__main__':
