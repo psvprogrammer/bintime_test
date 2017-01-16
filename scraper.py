@@ -31,8 +31,9 @@ def get_html(url):
             response = urllib.request.urlopen(url)
             result = True
             break
-        except urllib.request.URLError:
-            print('cant resolve current url: ' + url)
+        except urllib.request.URLError as e:
+            print('\ncant resolve current url: ' + url)
+            print('(' + str(e) + ')')
             print('trying again')
 
     if result:
@@ -42,66 +43,71 @@ def get_html(url):
 
 
 def parse_all_products(html, writer):
-    print('getting product pages..')
-    html = BeautifulSoup(html)
+    print('getting product pages...')
+    html = BeautifulSoup(html, "html.parser")
     try:
         page_len = int(html.find('div', id='J_topPage').span.i.text)
     except AttributeError:
         page_len = 1
 
-    products_data = []
-    for page in range(1, page_len+1):
-        parse_page(page, page_len, products_data, writer)
+    print(str(page_len) + ' pages found')
+    print('getting product list...')
+    sku_list = get_products_sku_list(page_len+1)
+    print('getting product prices...')
+    price_list = get_products_prices(sku_list)
+    parse_sku_list(sku_list, price_list, writer)
     return
 
 
-def parse_page(page, page_len, products_data, writer):
-    print('\nparsing page ' + str(page) +
-          '/' + str(page_len) + ':')
-    html = get_html(GET_PAGE_URL + str(page))
-    html = BeautifulSoup(html)
-    product_list = html.find('div', {"id": "J_goodsList"}).ul
-    products = product_list.find_all('li')
+def get_products_sku_list(page_len):
+    sku_list = []
+    for page in range(1, page_len):
+        html = get_html(GET_PAGE_URL + str(page))
+        html = BeautifulSoup(html, "html.parser")
+        product_list = html.find('div', {"id": "J_goodsList"}).ul
+        products = product_list.find_all('li')
 
-    # collecting products sku to get all product prices at ones than
-    products_sku = []
-    for product in products:
-        products_sku.append('J_' + product.attrs['data-sku'])
+        # collecting products sku to get all product prices at ones than
+        for product in products:
+            sku_list.append('J_' + product.attrs['data-sku'])
 
-    print('getting product prices')
-    prices = get_product_prices(products_sku)
+    all_products_len = len(sku_list)
+    # remove duplicates
+    sku_list = list(set(sku_list))
 
+    print(str(all_products_len) + ' products found (' +
+          str(len(sku_list)) + ' - unique)')
+    return sku_list
+
+
+def parse_sku_list(sku_list, price_list, writer):
     print('gathering product info...')
     iteration = 0
-    length = len(products)
-    suffix = 'complete'
+    length = len(sku_list)
 
-    for product in products:
-        mpn = product['data-sku']
+    for sku in sku_list:
+        mpn = sku.replace('J_', '')
         product_url = PRODUCT_URL + mpn + '.html'
         page_html = get_html(product_url)
-        product_page = BeautifulSoup(page_html)
-
+        product_page = BeautifulSoup(page_html, "html.parser")
         if product_page:
             product_obj = parse_product_page(product_page, mpn,
-                                             product_url, prices)
-            if product_obj not in products_data:
-                writer.writerow((
-                    product_obj['Brand'],
-                    product_obj['MPN'],
-                    product_obj['URL'],
-                    product_obj['Name'],
-                    product_obj['Price'],
-                    product_obj['Stock'],
-                ))
-                products_data.append(product_obj)
+                                             product_url, price_list)
+            writer.writerow((
+                product_obj['Brand'],
+                product_obj['MPN'],
+                product_obj['URL'],
+                product_obj['Name'],
+                product_obj['Price'],
+                product_obj['Stock'],
+            ))
+            suffix = 'complete'
+        else:
+            suffix = 'complete (skipped invalid html)'
 
         iteration += 1
-        prefix = 'Progress page ' + str(page) +\
-                 ' (' + str(iteration) + '/' + str(length) + ')'
+        prefix = 'Progress (' + str(iteration) + '/' + str(length) + ')'
         print_progress(iteration, length, prefix, suffix, bar_length=50)
-
-    return
 
 
 # Print iterations progress
@@ -128,14 +134,27 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1,
     sys.stdout.flush()
 
 
-def get_product_prices(products_sku):
-    byte_response = get_html(GET_PRICE_URL + ','.join(products_sku))
-    str_response = byte_response.decode("utf-8", errors='ignore').strip()
-    jdata = json.loads(str_response)
+def get_products_prices(products_sku):
     prices = {}
+    if len(products_sku) > 100:
+        # divide list on parts by 100 units (max possible)
+        products_sku = [products_sku[i:i + 100]
+                        for i in range(0, len(products_sku), 100)]
+        for part in products_sku:
+            byte_response = get_html(GET_PRICE_URL + ','.join(part))
+            parse_products_prices(byte_response, prices)
+    else:
+        byte_response = get_html(GET_PRICE_URL + ','.join(products_sku))
+        parse_products_prices(byte_response, prices)
+    return prices
+
+
+def parse_products_prices(response, prices):
+    str_response = response.decode("utf-8", errors='ignore').strip()
+    jdata = json.loads(str_response)
     for data in jdata:
         prices[data['id'].replace('J_', '')] = data['p']
-    return prices
+    return
 
 
 def get_product_stock(html, mpn):
@@ -186,9 +205,9 @@ def parse_product_page(html, mpn, url, prices):
 
     stock = get_product_stock(html, mpn)
 
-    if prices[mpn]:
+    try:
         price = prices[mpn]
-    else:
+    except KeyError:
         price = 0
 
     product_data = {
@@ -210,7 +229,7 @@ def main():
             html = get_html(INIT_URL)
             parse_all_products(html, writer)
         except Exception as e:
-            print(e)
+            print('\n' + str(e))
 
 
 if __name__ == '__main__':
